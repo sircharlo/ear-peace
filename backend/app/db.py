@@ -7,7 +7,7 @@ from typing import Generator
 
 from sqlmodel import SQLModel, Field, create_engine, Session, select
 
-DB_PATH = Path(os.getenv("EARPEACE_DB_PATH", "backend/storage/app.db")).resolve()
+DB_PATH = Path(os.getenv("EARPEACE_DB_PATH", "storage/app.db")).resolve()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 ENGINE = create_engine(f"sqlite:///{DB_PATH}", echo=False)
 
@@ -19,6 +19,7 @@ class MediaAsset(SQLModel, table=True):
     non_ad_key: str = Field(index=True)
     mp4_path: str | None = None
     wav_path: str | None = None
+    file_size: int | None = None
     status: str = Field(default="pending", index=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -26,6 +27,15 @@ class MediaAsset(SQLModel, table=True):
 
 def create_db_and_tables() -> None:
     SQLModel.metadata.create_all(ENGINE)
+    # Best-effort migration: add file_size column if missing (SQLite only)
+    try:
+        with ENGINE.connect() as conn:
+            cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(mediaasset);")]
+            if "file_size" not in cols:
+                conn.exec_driver_sql("ALTER TABLE mediaasset ADD COLUMN file_size INTEGER;")
+    except Exception:
+        # Non-fatal if migration fails; code can operate without the column in fresh DBs
+        pass
 
 
 def get_session() -> Generator[Session, None, None]:
@@ -33,14 +43,14 @@ def get_session() -> Generator[Session, None, None]:
         yield session
 
 
-def upsert_media_asset(*, ad_key: str, ad_lang: str, non_ad_key: str, mp4_path: str | None, wav_path: str | None, status: str) -> MediaAsset:
+def upsert_media_asset(*, ad_key: str, ad_lang: str, non_ad_key: str, mp4_path: str | None, wav_path: str | None, file_size: int | None, status: str) -> MediaAsset:
     with Session(ENGINE) as session:
         stmt = select(MediaAsset).where(MediaAsset.non_ad_key == non_ad_key)
         asset = session.exec(stmt).first()
         if asset is None:
             asset = MediaAsset(
                 ad_key=ad_key, ad_lang=ad_lang, non_ad_key=non_ad_key,
-                mp4_path=mp4_path, wav_path=wav_path, status=status,
+                mp4_path=mp4_path, wav_path=wav_path, file_size=file_size, status=status,
             )
             session.add(asset)
         else:
@@ -48,6 +58,7 @@ def upsert_media_asset(*, ad_key: str, ad_lang: str, non_ad_key: str, mp4_path: 
             asset.ad_lang = ad_lang
             asset.mp4_path = mp4_path
             asset.wav_path = wav_path
+            asset.file_size = file_size
             asset.status = status
             asset.updated_at = datetime.utcnow()
         session.commit()

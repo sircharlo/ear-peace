@@ -76,7 +76,7 @@ class MatchResult(BaseModel):
 
 JW_BASE = "https://b.jw-cdn.org/apis/mediator/v1"
 JW_CATEGORY_URL = JW_BASE + "/categories/E/VODMidweekMeetingAD?detailed=1&mediaLimit=0&clientType=www"
-STORAGE_DIR = Path(os.getenv("EARPEACE_STORAGE_DIR", "backend/storage")).resolve()
+STORAGE_DIR = Path(os.getenv("EARPEACE_STORAGE_DIR", "storage")).resolve()
 INDEX_DIR = STORAGE_DIR / "indexes"
 TEMP_DIR = STORAGE_DIR / "tmp"
 CUSTOM_DIR = STORAGE_DIR / "custom"
@@ -582,30 +582,37 @@ async def _prepare_and_index_custom(key: str) -> None:
             break
     if not target:
         return
-    # transcode to wav mono/16k
+    # transcode to wav mono/16k (skip if exists)
     wav_path = CUSTOM_DIR / f"{key}.wav"
-    ffmpeg_cmd = [
-        "ffmpeg", "-y", "-i", str(target.file_path),
-        "-ac", "1", "-ar", "16000", str(wav_path)
-    ]
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ffmpeg_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if result.returncode != 0:
+    if wav_path.exists():
+        upsert_custom_media(key=key, title=target.title, file_path=target.file_path, file_size=target.file_size, wav_path=str(wav_path), status="prepared")
+    else:
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", str(target.file_path),
+            "-ac", "1", "-ar", "16000", str(wav_path)
+        ]
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ffmpeg_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode != 0:
+                return
+        except FileNotFoundError:
             return
-    except FileNotFoundError:
-        return
-    upsert_custom_media(key=key, title=target.title, file_path=target.file_path, file_size=target.file_size, wav_path=str(wav_path), status="prepared")
-    # build index
+        upsert_custom_media(key=key, title=target.title, file_path=target.file_path, file_size=target.file_size, wav_path=str(wav_path), status="prepared")
+    # build index (skip if exists)
     try:
-        idx = fplib.index_reference(wav_path)
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
-        fplib.save_index(idx, INDEX_DIR / f"custom_{key}.fp")
+        idx_path = INDEX_DIR / f"custom_{key}.fp"
+        if idx_path.exists():
+            upsert_custom_media(key=key, title=target.title, file_path=target.file_path, file_size=target.file_size, wav_path=str(wav_path), status="indexed")
+            return
+        idx = fplib.index_reference(wav_path)
+        fplib.save_index(idx, idx_path)
         upsert_custom_media(key=key, title=target.title, file_path=target.file_path, file_size=target.file_size, wav_path=str(wav_path), status="indexed")
     except Exception:
         pass
@@ -641,56 +648,120 @@ async def _prepare_non_ad(ad_natural_key: str, ad_lang: str) -> dict:
     src_path = STORAGE_DIR / f"{base_name}.mp4"
     wav_path = STORAGE_DIR / f"{base_name}.wav"
 
-    upsert_media_asset(
-        ad_key=ad_natural_key,
-        ad_lang=ad_lang,
-        non_ad_key=non_ad_key,
-        mp4_path=str(src_path),
-        wav_path=None,
-        status="downloading",
-    )
-
-    async with httpx.AsyncClient(timeout=None) as client:
-        async with client.stream("GET", chosen["progressiveDownloadURL"]) as resp:
-            resp.raise_for_status()
-            with open(src_path, "wb") as f:
-                async for chunk in resp.aiter_bytes():
-                    f.write(chunk)
-
-    upsert_media_asset(
-        ad_key=ad_natural_key,
-        ad_lang=ad_lang,
-        non_ad_key=non_ad_key,
-        mp4_path=str(src_path),
-        wav_path=None,
-        status="downloaded",
-    )
-
-    ffmpeg_cmd = [
-        "ffmpeg", "-y", "-i", str(src_path),
-        "-ac", "1", "-ar", "16000", str(wav_path)
-    ]
+    # Try to fetch expected size via HEAD and skip download if size matches
+    expected_size: int | None = None
     try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ffmpeg_cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError("ffmpeg failed")
-    except FileNotFoundError:
-        raise HTTPException(status_code=500, detail="ffmpeg not found. Please install ffmpeg.")
+        async with httpx.AsyncClient(timeout=15) as client:
+            hr = await client.head(chosen["progressiveDownloadURL"])
+            if hr.status_code == 200:
+                cl = hr.headers.get("Content-Length")
+                if cl and cl.isdigit():
+                    expected_size = int(cl)
+    except Exception:
+        expected_size = None
 
-    upsert_media_asset(
-        ad_key=ad_natural_key,
-        ad_lang=ad_lang,
-        non_ad_key=non_ad_key,
-        mp4_path=str(src_path),
-        wav_path=str(wav_path),
-        status="prepared",
-    )
+    need_download = True
+    # If we know expected size, and local file exists and matches and is non-zero, skip download
+    if src_path.exists() and expected_size is not None:
+        try:
+            local_size = src_path.stat().st_size
+            if local_size > 0 and local_size == expected_size:
+                upsert_media_asset(
+                    ad_key=ad_natural_key,
+                    ad_lang=ad_lang,
+                    non_ad_key=non_ad_key,
+                    mp4_path=str(src_path),
+                    wav_path=None,
+                    file_size=local_size,
+                    status="downloaded",
+                )
+                need_download = False
+            
+        except Exception:
+            need_download = True
+
+    # If HEAD didn't give size, but we already have a non-empty file, accept it
+    if need_download and src_path.exists() and expected_size is None:
+        try:
+            local_size = src_path.stat().st_size
+            if local_size > 0:
+                upsert_media_asset(
+                    ad_key=ad_natural_key,
+                    ad_lang=ad_lang,
+                    non_ad_key=non_ad_key,
+                    mp4_path=str(src_path),
+                    wav_path=None,
+                    file_size=local_size,
+                    status="downloaded",
+                )
+                need_download = False
+        except Exception:
+            pass
+
+    if need_download:
+        upsert_media_asset(
+            ad_key=ad_natural_key,
+            ad_lang=ad_lang,
+            non_ad_key=non_ad_key,
+            mp4_path=str(src_path),
+            wav_path=None,
+            file_size=None,
+            status="downloading",
+        )
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", chosen["progressiveDownloadURL"]) as resp:
+                resp.raise_for_status()
+                with open(src_path, "wb") as f:
+                    async for chunk in resp.aiter_bytes():
+                        f.write(chunk)
+        upsert_media_asset(
+            ad_key=ad_natural_key,
+            ad_lang=ad_lang,
+            non_ad_key=non_ad_key,
+            mp4_path=str(src_path),
+            wav_path=None,
+            file_size=src_path.stat().st_size if src_path.exists() else None,
+            status="downloaded",
+        )
+
+    # Skip preparing if WAV already exists
+    if wav_path.exists() and (wav_path.stat().st_size > 0):
+        upsert_media_asset(
+            ad_key=ad_natural_key,
+            ad_lang=ad_lang,
+            non_ad_key=non_ad_key,
+            mp4_path=str(src_path),
+            wav_path=str(wav_path),
+            file_size=src_path.stat().st_size if src_path.exists() else None,
+            status="prepared",
+        )
+    else:
+        ffmpeg_cmd = [
+            "ffmpeg", "-y", "-i", str(src_path),
+            "-ac", "1", "-ar", "16000", str(wav_path)
+        ]
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ffmpeg_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode != 0:
+                raise RuntimeError("ffmpeg failed")
+        except FileNotFoundError:
+            raise HTTPException(status_code=500, detail="ffmpeg not found. Please install ffmpeg.")
+
+        upsert_media_asset(
+            ad_key=ad_natural_key,
+            ad_lang=ad_lang,
+            non_ad_key=non_ad_key,
+            mp4_path=str(src_path),
+            wav_path=str(wav_path),
+            file_size=src_path.stat().st_size if src_path.exists() else None,
+            status="prepared",
+        )
 
     return {
         "non_ad_key": non_ad_key,
@@ -745,6 +816,21 @@ async def fingerprint_build() -> dict:
         if not wav_path.exists():
             continue
         idx_path = INDEX_DIR / f"{asset.non_ad_key.replace('/', '_')}.fp"
+        # Skip indexing if already indexed
+        if idx_path.exists():
+            try:
+                upsert_media_asset(
+                    ad_key=asset.ad_key,
+                    ad_lang=asset.ad_lang,
+                    non_ad_key=asset.non_ad_key,
+                    mp4_path=asset.mp4_path,
+                    wav_path=asset.wav_path,
+                    file_size=asset.file_size,
+                    status="indexed",
+                )
+            except Exception:
+                pass
+            continue
         try:
             idx = fplib.index_reference(wav_path)
             fplib.save_index(idx, idx_path)
@@ -754,6 +840,7 @@ async def fingerprint_build() -> dict:
                 non_ad_key=asset.non_ad_key,
                 mp4_path=asset.mp4_path,
                 wav_path=asset.wav_path,
+                file_size=asset.file_size,
                 status="indexed",
             )
             built += 1
