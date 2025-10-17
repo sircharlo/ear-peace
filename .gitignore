@@ -1,2 +1,5 @@
 # Ignore downloaded files
 backend/storage
+# Python virtual envs
+.venv/
+backend/.venv/
