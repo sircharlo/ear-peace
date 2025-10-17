@@ -1,0 +1,22 @@
+{
+    "cSpell.words": [
+        "aiosqlite",
+        "argpartition",
+        "EARPEACE",
+        "fastapi",
+        "fplib",
+        "httpx",
+        "ndarray",
+        "nfft",
+        "nonad",
+        "noverlap",
+        "nperseg",
+        "scipy",
+        "sjjm",
+        "sqlmodel",
+        "stft",
+        "uvicorn",
+        "Vite",
+        "wavfile"
+    ]
+}

@@ -1,0 +1,22 @@
+version: "3.9"
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - EARPEACE_STORAGE_DIR=/app/storage
+      - EARPEACE_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
+    volumes:
+      - ./backend/storage:/app/storage
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://backend:8000
+        VITE_BASE: /
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend

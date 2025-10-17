@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Generator
+
+from sqlmodel import SQLModel, Field, create_engine, Session, select
+
+DB_PATH = Path(os.getenv("EARPEACE_DB_PATH", "backend/storage/app.db")).resolve()
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+ENGINE = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+
+
+class MediaAsset(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    ad_key: str = Field(index=True)
+    ad_lang: str = Field(index=True)
+    non_ad_key: str = Field(index=True)
+    mp4_path: str | None = None
+    wav_path: str | None = None
+    status: str = Field(default="pending", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+def create_db_and_tables() -> None:
+    SQLModel.metadata.create_all(ENGINE)
+
+
+def get_session() -> Generator[Session, None, None]:
+    with Session(ENGINE) as session:
+        yield session
+
+
+def upsert_media_asset(*, ad_key: str, ad_lang: str, non_ad_key: str, mp4_path: str | None, wav_path: str | None, status: str) -> MediaAsset:
+    with Session(ENGINE) as session:
+        stmt = select(MediaAsset).where(MediaAsset.non_ad_key == non_ad_key)
+        asset = session.exec(stmt).first()
+        if asset is None:
+            asset = MediaAsset(
+                ad_key=ad_key, ad_lang=ad_lang, non_ad_key=non_ad_key,
+                mp4_path=mp4_path, wav_path=wav_path, status=status,
+            )
+            session.add(asset)
+        else:
+            asset.ad_key = ad_key
+            asset.ad_lang = ad_lang
+            asset.mp4_path = mp4_path
+            asset.wav_path = wav_path
+            asset.status = status
+            asset.updated_at = datetime.utcnow()
+        session.commit()
+        session.refresh(asset)
+        return asset
+
+
+def get_assets_by_status(status: str) -> list[MediaAsset]:
+    with Session(ENGINE) as session:
+        stmt = select(MediaAsset).where(MediaAsset.status == status)
+        return list(session.exec(stmt).all())
+
+
+def get_asset_by_non_ad(non_ad_key: str) -> MediaAsset | None:
+    with Session(ENGINE) as session:
+        stmt = select(MediaAsset).where(MediaAsset.non_ad_key == non_ad_key)
+        return session.exec(stmt).first()
+
+
+def get_all_assets() -> list[MediaAsset]:
+    with Session(ENGINE) as session:
+        stmt = select(MediaAsset)
+        return list(session.exec(stmt).all())
