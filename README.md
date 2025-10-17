@@ -1,19 +1,18 @@
 # Ear Peace
 
-A simple web app designed to help blind and vision‑impaired people who attend Jehovah’s Witnesses meetings.
+A simple web app designed to help blind and vision‑impaired people who attend meetings of Jehovah’s Witnesses.
 
-## What it does (in simple terms)
+## What it does
 
-- **Finds meeting audio quickly**: The app can take a short audio sample and try to match it to items in a prepared list of clips for the week.
-- **Shows the week’s clips**: See a simple list of clips available for the current week.
-- **Manages custom audio**: You (or a helper) can upload custom media that the app can later recognize.
+- **Shows a simple list of meeting clips** available for the current week.
+- **Finds and synchronizes** the described-audio version of videos that will be played during the meeting with what's playing in the auditorium.
+- **Manages custom audio** so that you (or a helper) can upload custom media that the app can later recognize, for other events.
 
-The goal is to make it easier to get to the right audio without searching through screens.
+The goal is to make it easier to get to the right file and to sync the described audio with the video that's currently playing in the auditorium.
 
 ## Who it’s for
 
-- **Blind** and **vision‑impaired** attendees of JW meetings.
-- Anyone assisting them who wants a very simple way to jump to the right audio clip.
+- **Blind** and **vision‑impaired** attendees of meetings of Jehovah’s Witnesses.
 
 ## Current status
 
@@ -24,9 +23,11 @@ The goal is to make it easier to get to the right audio without searching throug
 
 - Requirements: **Docker** and **Docker Compose**.
 - Start the app:
+
   ```bash
   docker compose up -d --build
   ```
+
 - Open the frontend: `http://localhost:8080`
 - Backend API (for reference): `http://localhost:8000`
 
@@ -39,8 +40,3 @@ The goal is to make it easier to get to the right audio without searching throug
 
 - **Feedback**: Open an issue describing what worked, what didn’t, and what you’d like to see.
 - **Pull requests**: Small, focused PRs are appreciated. Accessibility improvements are a priority.
-
-## Privacy note
-
-- Audio samples used for matching are sent to the backend only to perform the match and are not intended for sharing.
-- This is a local app; please still use it with discretion and in harmony with local laws and guidelines.
