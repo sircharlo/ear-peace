@@ -4,4 +4,4 @@ backend/storage
 .venv/
 backend/.venv/
 # pycache
-*__pycache__/
+**/__pycache__/
