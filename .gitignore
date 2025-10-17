@@ -3,3 +3,5 @@ backend/storage
 # Python virtual envs
 .venv/
 backend/.venv/
+# pycache
+*__pycache__/
