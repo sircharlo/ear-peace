@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -10,7 +10,19 @@ import os
 from pathlib import Path
 import asyncio
 import subprocess
-from .db import create_db_and_tables, upsert_media_asset, get_assets_by_status, get_asset_by_non_ad, get_all_assets
+from .db import (
+    create_db_and_tables,
+    upsert_media_asset,
+    get_assets_by_status,
+    get_asset_by_non_ad,
+    get_all_assets,
+    upsert_custom_media,
+    get_all_custom,
+    get_custom_by_status,
+    delete_custom_by_key,
+    delete_asset_by_paths,
+    delete_asset_by_nonad,
+)
 from . import fp as fplib
 
 app = FastAPI(title="EarPeace Backend", version="0.1.0")
@@ -67,6 +79,7 @@ JW_CATEGORY_URL = JW_BASE + "/categories/E/VODMidweekMeetingAD?detailed=1&mediaL
 STORAGE_DIR = Path(os.getenv("EARPEACE_STORAGE_DIR", "backend/storage")).resolve()
 INDEX_DIR = STORAGE_DIR / "indexes"
 TEMP_DIR = STORAGE_DIR / "tmp"
+CUSTOM_DIR = STORAGE_DIR / "custom"
 
 # Maintenance state
 LAST_MAINTENANCE_AT: Optional[float] = None
@@ -197,33 +210,48 @@ async def match_clip(
 
     # Build index map from DB (indexed assets)
     indexed = get_assets_by_status("indexed")
+    custom_indexed = get_custom_by_status("indexed")
     indices = {}
     if clip_id:
-        # Restrict to selected clip only
-        non_ad_hint = compute_non_ad_natural_key(clip_id)
-        if non_ad_hint:
-            idx_path = INDEX_DIR / f"{non_ad_hint.replace('/', '_')}.fp"
+        # Support custom media restriction
+        if clip_id.startswith("custom:"):
+            key = clip_id.split(":", 1)[1]
+            idx_path = INDEX_DIR / f"custom_{key}.fp"
             if idx_path.exists():
-                indices[non_ad_hint] = idx_path
-        # If not found by hint, try to resolve actual naturalKey via JW
-        if not indices:
-            # Reuse non-ad resolver to get actual key
-            url = f"{JW_BASE}/media-items/{lang}/{non_ad_hint or clip_id}?clientType=www"
-            async with httpx.AsyncClient(timeout=15) as client:
-                r = await client.get(url)
-                if r.status_code == 200:
-                    data = r.json()
-                    media = ((data or {}).get("media") or [{}])[0] or {}
-                    non_ad_key = media.get("naturalKey")
-                    if non_ad_key:
-                        idx_path = INDEX_DIR / f"{non_ad_key.replace('/', '_')}.fp"
-                        if idx_path.exists():
-                            indices[non_ad_key] = idx_path
+                indices[clip_id] = idx_path
+            if not indices:
+                raise HTTPException(status_code=400, detail="No custom index available for requested key")
+            # proceed to match only against this custom index
+        else:
+            # Restrict to selected clip only
+            non_ad_hint = compute_non_ad_natural_key(clip_id)
+            if non_ad_hint:
+                idx_path = INDEX_DIR / f"{non_ad_hint.replace('/', '_')}.fp"
+                if idx_path.exists():
+                    indices[non_ad_hint] = idx_path
+            # If not found by hint, try to resolve actual naturalKey via JW
+            if not indices:
+                # Reuse non-ad resolver to get actual key
+                url = f"{JW_BASE}/media-items/{lang}/{non_ad_hint or clip_id}?clientType=www"
+                async with httpx.AsyncClient(timeout=15) as client:
+                    r = await client.get(url)
+                    if r.status_code == 200:
+                        data = r.json()
+                        media = ((data or {}).get("media") or [{}])[0] or {}
+                        non_ad_key = media.get("naturalKey")
+                        if non_ad_key:
+                            idx_path = INDEX_DIR / f"{non_ad_key.replace('/', '_')}.fp"
+                            if idx_path.exists():
+                                indices[non_ad_key] = idx_path
     else:
         for asset in indexed:
             idx_path = INDEX_DIR / f"{asset.non_ad_key.replace('/', '_')}.fp"
             if idx_path.exists():
                 indices[asset.non_ad_key] = idx_path
+        for cm in custom_indexed:
+            idx_path = INDEX_DIR / f"custom_{cm.key}.fp"
+            if idx_path.exists():
+                indices[f"custom:{cm.key}"] = idx_path
 
     if not indices:
         raise HTTPException(status_code=400, detail="No indexed references available. Prepare and build fingerprints first.")
@@ -237,9 +265,13 @@ async def match_clip(
     if not best_key or conf <= 0:
         raise HTTPException(status_code=404, detail="No match found")
 
-    # Map non-AD key back to AD key for client convenience
-    asset = get_asset_by_non_ad(best_key)
-    out_clip_id = asset.ad_key if asset else (clip_id or best_key)
+    # Map non-AD key back to AD key for client convenience, or custom key
+    out_clip_id: str
+    if clip_id and clip_id.startswith("custom:"):
+        out_clip_id = clip_id
+    else:
+        asset = get_asset_by_non_ad(best_key)
+        out_clip_id = asset.ad_key if asset else (clip_id or best_key)
     return MatchResult(clip_id=out_clip_id, t_offset_ms=int(round(offset_sec * 1000)), confidence=float(conf))
 
 
@@ -384,6 +416,199 @@ async def fingerprint_assets() -> list[dict]:
             "updated_at": a.updated_at.isoformat() if hasattr(a, "updated_at") and a.updated_at else None,
         })
     return out
+
+
+# -------- Custom media endpoints --------
+class CustomUploadResponse(BaseModel):
+    keys: List[str]
+    started: bool = True
+
+
+@app.post("/admin/custom/upload", response_model=CustomUploadResponse)
+async def admin_custom_upload(files: List[UploadFile] = File(...)) -> CustomUploadResponse:
+    CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
+    keys: List[str] = []
+    for f in files:
+        # derive a safe key from filename (without extension)
+        name = Path(f.filename or "file").stem
+        base_key = re.sub(r"[^a-zA-Z0-9_-]", "_", name).strip("_") or "media"
+        key = base_key
+        i = 1
+        while any(cm.key == key for cm in get_all_custom()):
+            key = f"{base_key}_{i}"
+            i += 1
+        # save upload to disk under custom dir
+        dst_path = CUSTOM_DIR / f"{key}{Path(f.filename or '').suffix or '.bin'}"
+        with open(dst_path, "wb") as out:
+            out.write(await f.read())
+        size = dst_path.stat().st_size
+        upsert_custom_media(key=key, title=name, file_path=str(dst_path), file_size=size, wav_path=None, status="downloaded")
+        # background prepare and index
+        asyncio.create_task(_prepare_and_index_custom(key))
+        keys.append(key)
+    return CustomUploadResponse(keys=keys, started=True)
+
+
+@app.get("/admin/custom/list")
+async def admin_custom_list() -> list[dict]:
+    out = []
+    for cm in get_all_custom():
+        out.append({
+            "key": cm.key,
+            "title": cm.title,
+            "file_path": cm.file_path,
+            "file_size": cm.file_size,
+            "wav_path": cm.wav_path,
+            "status": cm.status,
+            "updated_at": cm.updated_at.isoformat() if cm.updated_at else None,
+        })
+    return out
+
+
+@app.get("/admin/custom/status")
+async def admin_custom_status(key: str = Query(...)) -> dict:
+    for cm in get_all_custom():
+        if cm.key == key:
+            return {
+                "key": cm.key,
+                "status": cm.status,
+                "file_path": cm.file_path,
+                "wav_path": cm.wav_path,
+                "updated_at": cm.updated_at.isoformat() if cm.updated_at else None,
+            }
+    return {"status": "missing"}
+
+
+@app.delete("/admin/custom")
+async def admin_custom_delete(key: str = Query(...)) -> dict:
+    # delete files and index
+    idx_path = INDEX_DIR / f"custom_{key}.fp"
+    try:
+        for cm in get_all_custom():
+            if cm.key == key:
+                try:
+                    if cm.file_path and Path(cm.file_path).exists():
+                        Path(cm.file_path).unlink(missing_ok=True)
+                    if cm.wav_path and Path(cm.wav_path).exists():
+                        Path(cm.wav_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                break
+        idx_path.unlink(missing_ok=True)
+    finally:
+        delete_custom_by_key(key)
+    return {"deleted": True}
+
+
+@app.get("/custom/file")
+async def custom_file(key: str = Query(...)):
+    for cm in get_all_custom():
+        if cm.key == key and cm.file_path and Path(cm.file_path).exists():
+            # Let browser infer type by extension
+            return FileResponse(path=cm.file_path)
+    raise HTTPException(status_code=404, detail="File not found")
+
+
+def _safe_join_storage(rel_path: str) -> Path:
+    p = (STORAGE_DIR / rel_path).resolve()
+    if not str(p).startswith(str(STORAGE_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return p
+
+
+@app.get("/admin/storage/list")
+async def admin_storage_list() -> list[dict]:
+    out: list[dict] = []
+    for root, dirs, files in os.walk(STORAGE_DIR):
+        for fn in files:
+            full = Path(root) / fn
+            # skip DB file
+            if full.name.endswith(".db"):
+                continue
+            rel = str(full.relative_to(STORAGE_DIR))
+            try:
+                size = full.stat().st_size
+            except Exception:
+                size = 0
+            out.append({"rel_path": rel, "size": size})
+    out.sort(key=lambda x: x["rel_path"])
+    return out
+
+
+@app.delete("/admin/storage")
+async def admin_storage_delete(rel_path: str = Query(...)) -> dict:
+    target = _safe_join_storage(rel_path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+    # Attempt DB cleanup for API media
+    try:
+        delete_asset_by_paths(str(target), None)
+    except Exception:
+        pass
+    # Attempt DB cleanup for custom media
+    try:
+        # find custom by file path or wav path
+        for cm in get_all_custom():
+            if cm.file_path == str(target) or cm.wav_path == str(target):
+                # delete index
+                idxp = INDEX_DIR / f"custom_{cm.key}.fp"
+                idxp.unlink(missing_ok=True)
+                delete_custom_by_key(cm.key)
+                break
+    except Exception:
+        pass
+    # Attempt to remove API index if rel path resembles wav or by non-ad key derivation
+    try:
+        # if filename corresponds to a non_ad key base
+        base = target.stem
+        idx_try = INDEX_DIR / f"{base}.fp"
+        idx_try.unlink(missing_ok=True)
+    except Exception:
+        pass
+    # finally delete file
+    try:
+        target.unlink(missing_ok=True)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to delete file")
+    return {"deleted": True}
+
+
+async def _prepare_and_index_custom(key: str) -> None:
+    # load record
+    target = None
+    for cm in get_all_custom():
+        if cm.key == key:
+            target = cm
+            break
+    if not target:
+        return
+    # transcode to wav mono/16k
+    wav_path = CUSTOM_DIR / f"{key}.wav"
+    ffmpeg_cmd = [
+        "ffmpeg", "-y", "-i", str(target.file_path),
+        "-ac", "1", "-ar", "16000", str(wav_path)
+    ]
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ffmpeg_cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode != 0:
+            return
+    except FileNotFoundError:
+        return
+    upsert_custom_media(key=key, title=target.title, file_path=target.file_path, file_size=target.file_size, wav_path=str(wav_path), status="prepared")
+    # build index
+    try:
+        idx = fplib.index_reference(wav_path)
+        INDEX_DIR.mkdir(parents=True, exist_ok=True)
+        fplib.save_index(idx, INDEX_DIR / f"custom_{key}.fp")
+        upsert_custom_media(key=key, title=target.title, file_path=target.file_path, file_size=target.file_size, wav_path=str(wav_path), status="indexed")
+    except Exception:
+        pass
 
 
 class EnqueueRequest(BaseModel):

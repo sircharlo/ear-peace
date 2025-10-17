@@ -5,7 +5,8 @@ import MicCapture from './components/MicCapture.vue'
 import ClipDetails from './components/ClipDetails.vue'
 import AdminPanel from './components/AdminPanel.vue'
 import type { Clip, MatchResult } from './api'
-import { getAdUrl } from './api'
+import { getAdUrl, listCustom, getCustomFileUrl } from './api'
+import CustomSelect from './components/CustomSelect.vue'
 
 const selected = ref<Clip | null>(null)
 const match = ref<MatchResult | null>(null)
@@ -13,6 +14,8 @@ const playing = ref(false)
 const error = ref<string | null>(null)
 const audioEl = ref<HTMLAudioElement | null>(null)
 const adUrl = ref<string | null>(null)
+const isCustom = ref<boolean>(false)
+const hasCustom = ref<boolean>(false)
 let driftTimer: number | null = null
 let syncWallMs = 0
 let syncMediaSec = 0
@@ -22,13 +25,17 @@ const syncBiasMs = ref(75)
 const captureBiasMs = 80
 const biasAnnounce = ref<string | null>(null)
 
-onMounted(() => {
+onMounted(async () => {
   const saved = localStorage.getItem('syncBiasMs')
   if (saved) {
     const n = parseInt(saved, 10)
     if (!Number.isNaN(n)) syncBiasMs.value = n
   }
   // Background prepare/build disabled
+  try {
+    const list = await listCustom()
+    hasCustom.value = Array.isArray(list) && list.length > 0
+  } catch {}
 })
 
 type MatchWithTiming = { result: MatchResult; listenStartMs: number; matchedAtMs: number }
@@ -37,9 +44,14 @@ async function onMatched(payload: MatchWithTiming) {
   match.value = payload.result
   if (!selected.value) return
   try {
-    // Use the selected language-agnostic key with its language code.
+    // Determine playback source based on selection type
     if (!adUrl.value) {
-      adUrl.value = await getAdUrl(selected.value.id, selected.value.language || 'E')
+      if (isCustom.value && selected.value.id.startsWith('custom:')) {
+        const key = selected.value.id.substring('custom:'.length)
+        adUrl.value = getCustomFileUrl(key)
+      } else {
+        adUrl.value = await getAdUrl(selected.value.id, selected.value.language || 'E')
+      }
     }
     await nextTickPlay(payload)
   } catch (e: any) {
@@ -119,7 +131,18 @@ function onSelect(c: Clip) {
   error.value = null
   stopDriftControl()
   // Prefetch AD URL to reduce start latency
-  getAdUrl(c.id, c.language || 'E').then(url => { adUrl.value = url }).catch(() => {})
+  isCustom.value = false
+  getAdUrl(c.id, c.language || 'E').then(url => { if (!isCustom.value) adUrl.value = url }).catch(() => {})
+}
+
+function onSelectCustom(key: string) {
+  // Create a pseudo-Clip for custom
+  selected.value = { id: `custom:${key}`, title: key, fingerprint_status: 'indexed' } as any
+  isCustom.value = true
+  match.value = null
+  adUrl.value = getCustomFileUrl(key)
+  error.value = null
+  stopDriftControl()
 }
 
 function togglePlay() {
@@ -201,12 +224,20 @@ const showAdmin = ref(false)
     <h1 id="app-title">EarPeace</h1>
     <p id="app-desc">Select the clip once it starts playing in the Kingdom Hall, and we will sync the Audio Description version of the file so that you can listen along with your headphones.</p>
 
+    <div class="tabs" v-if="hasCustom">
+      <ul>
+        <li :class="{ 'is-active': !isCustom }"><a @click.prevent="isCustom=false">Meeting media</a></li>
+        <li :class="{ 'is-active': isCustom }" v-if="hasCustom"><a @click.prevent="isCustom=true">Other media</a></li>
+      </ul>
+    </div>
+
     <div role="region" aria-labelledby="select-title" v-if="!selected">
-      <ClipSelect @select="onSelect" />
+      <ClipSelect v-if="!isCustom" @select="onSelect" />
+      <CustomSelect v-else @select="onSelectCustom" />
     </div>
 
     <div role="region" aria-labelledby="listen-title" v-else-if="!match">
-      <ClipDetails :clip="selected!" />
+      <ClipDetails v-if="!isCustom" :clip="selected!" />
       <MicCapture :clip-id="selected!.id" :lang="selected!.language || 'E'" @matched="onMatched" />
       <button @click="() => { selected = null as any }" aria-label="Change selection">Change selection</button>
     </div>

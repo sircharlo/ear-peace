@@ -6,6 +6,7 @@ const api = axios.create({ baseURL: apiBase })
 export type Clip = { id: string; title: string; duration_ms?: number; fingerprint_status: string; language?: string }
 export type MatchResult = { clip_id: string; t_offset_ms: number; confidence: number }
 export type AssetSummary = { ad_key: string; ad_lang: string; non_ad_key: string; mp4_path?: string | null; wav_path?: string | null; status: string; updated_at?: string | null }
+export type CustomMedia = { key: string; title?: string | null; file_path: string; file_size?: number | null; wav_path?: string | null; status: string; updated_at?: string | null }
 
 export async function getWeeklyClips(): Promise<Clip[]> {
   const { data } = await api.get<Clip[]>('/clips/week')
@@ -64,5 +65,47 @@ export async function getAdminStatus(): Promise<{ last_maintenance_at?: number |
 
 export async function startMaintenance(): Promise<{ started: boolean }> {
   const { data } = await api.post(`/admin/maintenance`)
+  return data
+}
+
+export async function listCustom(): Promise<CustomMedia[]> {
+  const { data } = await api.get<CustomMedia[]>(`/admin/custom/list`)
+  return data
+}
+
+export async function uploadCustom(files: File[], onProgress?: (percent: number) => void): Promise<{ keys: string[]; started: boolean }> {
+  const fd = new FormData()
+  for (const f of files) fd.append('files', f)
+  const { data } = await api.post(`/admin/custom/upload`, fd, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: (e) => {
+      if (!onProgress) return
+      if (e.total) onProgress(Math.round((e.loaded / e.total) * 100))
+    },
+  })
+  return data
+}
+
+export async function getCustomStatus(key: string): Promise<{ key?: string; status: string; file_path?: string; wav_path?: string; updated_at?: string | null }> {
+  const { data } = await api.get(`/admin/custom/status`, { params: { key } })
+  return data
+}
+
+export async function deleteCustom(key: string): Promise<{ deleted: boolean }> {
+  const { data } = await api.delete(`/admin/custom`, { params: { key } })
+  return data
+}
+
+export function getCustomFileUrl(key: string): string {
+  return `${apiBase}/custom/file?key=${encodeURIComponent(key)}`
+}
+
+export async function listStorage(): Promise<{ rel_path: string; size: number }[]> {
+  const { data } = await api.get(`/admin/storage/list`)
+  return data
+}
+
+export async function deleteStorage(rel_path: string): Promise<{ deleted: boolean }> {
+  const { data } = await api.delete(`/admin/storage`, { params: { rel_path } })
   return data
 }
