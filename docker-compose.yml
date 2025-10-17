@@ -7,6 +7,7 @@ services:
     environment:
       - EARPEACE_STORAGE_DIR=/app/storage
       - EARPEACE_CORS_ORIGINS=http://localhost:8080,http://127.0.0.1:8080
+      - EARPEACE_CRON_INTERVAL_SECONDS=86400
     volumes:
       - ./backend/storage:/app/storage
 

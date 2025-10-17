@@ -38,6 +38,13 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup() -> None:
     create_db_and_tables()
+    # Start maintenance scheduler if enabled
+    try:
+        interval = int(os.getenv("EARPEACE_CRON_INTERVAL_SECONDS", "86400"))
+    except Exception:
+        interval = 86400
+    if interval > 0:
+        asyncio.get_event_loop().create_task(_maintenance_scheduler(interval))
 
 
 class Clip(BaseModel):
@@ -60,6 +67,9 @@ JW_CATEGORY_URL = JW_BASE + "/categories/E/VODMidweekMeetingAD?detailed=1&mediaL
 STORAGE_DIR = Path(os.getenv("EARPEACE_STORAGE_DIR", "backend/storage")).resolve()
 INDEX_DIR = STORAGE_DIR / "indexes"
 TEMP_DIR = STORAGE_DIR / "tmp"
+
+# Maintenance state
+LAST_MAINTENANCE_AT: Optional[float] = None
 
 
 def _ms_from_seconds(sec: Optional[float]) -> Optional[int]:
@@ -288,6 +298,78 @@ async def get_non_ad_item(
     }
 
 
+# -------- Maintenance (scheduler/admin) --------
+async def _prepare_all_sync() -> int:
+    # Fetch weekly clips and prepare sequentially
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(JW_CATEGORY_URL)
+        r.raise_for_status()
+        data = r.json()
+    media = (data or {}).get("category", {}).get("media", []) or []
+    ad_lang = (data or {}).get("language", {}).get("languageCode", "E")
+
+    prepared = 0
+    for item in media:
+        ad_key = item.get("languageAgnosticNaturalKey") or item.get("naturalKey")
+        if not ad_key:
+            continue
+        non_ad_hint = compute_non_ad_natural_key(ad_key) or ""
+        asset = get_asset_by_non_ad(non_ad_hint) if non_ad_hint else None
+        if asset and asset.status in ("prepared", "indexed"):
+            continue
+        try:
+            await _prepare_non_ad(ad_key, ad_lang)
+            prepared += 1
+        except Exception:
+            continue
+    return prepared
+
+
+async def run_maintenance() -> dict:
+    global LAST_MAINTENANCE_AT
+    prepared = await _prepare_all_sync()
+    built = (await fingerprint_build()).get("indexed", 0)
+    LAST_MAINTENANCE_AT = asyncio.get_event_loop().time()
+    return {"prepared": prepared, "indexed": built, "last_run": LAST_MAINTENANCE_AT}
+
+
+async def _maintenance_scheduler(interval_seconds: int) -> None:
+    global LAST_MAINTENANCE_AT
+    while True:
+        try:
+            await run_maintenance()
+        except Exception:
+            pass
+        # sleep for interval
+        await asyncio.sleep(max(60, interval_seconds))
+
+
+@app.get("/admin/status")
+async def admin_status() -> dict:
+    try:
+        interval = int(os.getenv("EARPEACE_CRON_INTERVAL_SECONDS", "86400"))
+    except Exception:
+        interval = 86400
+    # summarize counts by status
+    assets = get_all_assets()
+    counts: dict[str, int] = {}
+    for a in assets:
+        counts[a.status] = counts.get(a.status, 0) + 1
+    return {
+        "last_maintenance_at": LAST_MAINTENANCE_AT,
+        "interval_seconds": interval,
+        "counts": counts,
+        "total_assets": len(assets),
+    }
+
+
+@app.post("/admin/maintenance")
+async def admin_maintenance() -> dict:
+    # trigger in background
+    asyncio.create_task(run_maintenance())
+    return {"started": True}
+
+
 @app.get("/fingerprint/assets")
 async def fingerprint_assets() -> list[dict]:
     out = []
@@ -299,6 +381,7 @@ async def fingerprint_assets() -> list[dict]:
             "mp4_path": a.mp4_path,
             "wav_path": a.wav_path,
             "status": a.status,
+            "updated_at": a.updated_at.isoformat() if hasattr(a, "updated_at") and a.updated_at else None,
         })
     return out
 

@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import ClipSelect from './components/ClipSelect.vue'
 import MicCapture from './components/MicCapture.vue'
 import ClipDetails from './components/ClipDetails.vue'
+import AdminPanel from './components/AdminPanel.vue'
 import type { Clip, MatchResult } from './api'
 import { getAdUrl } from './api'
 
@@ -177,10 +178,26 @@ function adjustBias(deltaMs: number) {
   syncMediaSec = el.currentTime
   el.playbackRate = 1.0
 }
+const showAdmin = ref(false)
+
 </script>
 
 <template>
-  <main>
+  <nav class="navbar is-light" role="navigation" aria-label="main navigation">
+    <div class="navbar-brand">
+      <a class="navbar-item" href="#" @click.prevent="showAdmin = false">
+        EarPeace
+      </a>
+    </div>
+    <div class="navbar-menu is-active">
+      <div class="navbar-start">
+        <a class="navbar-item" href="#" @click.prevent="showAdmin = false">Home</a>
+        <a class="navbar-item" href="#" @click.prevent="showAdmin = true">Admin</a>
+      </div>
+    </div>
+  </nav>
+
+  <main v-if="!showAdmin">
     <h1 id="app-title">EarPeace</h1>
     <p id="app-desc">Select the clip once it starts playing in the Kingdom Hall, and we will sync the Audio Description version of the file so that you can listen along with your headphones.</p>
 
@@ -209,6 +226,9 @@ function adjustBias(deltaMs: number) {
       <p aria-live="polite">Matched clip: {{ match.clip_id }}, offset: {{ (match.t_offset_ms/1000).toFixed(2) }}s, confidence: {{ (match.confidence*100).toFixed(0) }}%</p>
     </div>
   </main>
+  <section v-else>
+    <AdminPanel />
+  </section>
 </template>
 
 <style scoped>

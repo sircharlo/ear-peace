@@ -5,6 +5,7 @@ const api = axios.create({ baseURL: apiBase })
 
 export type Clip = { id: string; title: string; duration_ms?: number; fingerprint_status: string; language?: string }
 export type MatchResult = { clip_id: string; t_offset_ms: number; confidence: number }
+export type AssetSummary = { ad_key: string; ad_lang: string; non_ad_key: string; mp4_path?: string | null; wav_path?: string | null; status: string; updated_at?: string | null }
 
 export async function getWeeklyClips(): Promise<Clip[]> {
   const { data } = await api.get<Clip[]>('/clips/week')
@@ -48,5 +49,20 @@ export async function getFingerprintStatus(nonAdKey: string): Promise<{ status: 
 
 export async function prepareAll(): Promise<{ queued: number }> {
   const { data } = await api.post(`/fingerprint/prepare-all`)
+  return data
+}
+
+export async function getAssets(): Promise<AssetSummary[]> {
+  const { data } = await api.get<AssetSummary[]>(`/fingerprint/assets`)
+  return data
+}
+
+export async function getAdminStatus(): Promise<{ last_maintenance_at?: number | null; interval_seconds: number; counts: Record<string, number>; total_assets: number }> {
+  const { data } = await api.get(`/admin/status`)
+  return data
+}
+
+export async function startMaintenance(): Promise<{ started: boolean }> {
+  const { data } = await api.post(`/admin/maintenance`)
   return data
 }
